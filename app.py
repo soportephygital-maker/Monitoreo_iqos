@@ -6,19 +6,19 @@ import os
 import smtplib
 from zoneinfo import ZoneInfo
 
-# Importaciones nuevas para exportar archivos
+# Importaciones para exportar archivos
 from flask import Flask, Response, jsonify, make_response, request
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 app = Flask(__name__)
 
 # Diccionarios y listas en memoria para almacenar estados e historiales
 computadoras = {}
-historial_fallas = []   # Registra solo cuando un equipo pasa a "Offline"
-historial_estatus = []  # Registra todas las actualizaciones de estado (Online/Offline)
+historial_fallas = []   
+historial_estatus = []  
 
 # Configuración de alertas por correo usando las variables de entorno de Render
 EMAIL_USER = os.environ.get("EMAIL_USER", "soportephygital@gmail.com")
@@ -26,8 +26,8 @@ EMAIL_PASS = os.environ.get("EMAIL_PASS", "obfl nmnm izhl kndg")
 EMAIL_DESTINO = "soportephygital@gmail.com"
 
 
-def enviar_correo_alerta(id_pc):
-    """Función para enviar un correo seguro vía SMTP TLS cuando una PC se desconecta"""
+def enviar_correo_alerta(id_pc, detalle):
+    """Función para enviar un correo seguro vía SMTP TLS cuando una PC cambia de estado crítico"""
     if not EMAIL_PASS:
         print("[ALERTA CORREO] No se pudo enviar: Falta configurar la variable EMAIL_PASS en Render.")
         return
@@ -36,9 +36,9 @@ def enviar_correo_alerta(id_pc):
         msg = MIMEMultipart()
         msg["From"] = EMAIL_USER
         msg["To"] = EMAIL_DESTINO
-        msg["Subject"] = f"🚨 ALERTA: {id_pc} se encuentra FUERA DE LÍNEA"
+        msg["Subject"] = f"🚨 ALERTA: {id_pc} -> {detalle.upper()}"
 
-        cuerpo = f"El sistema de monitoreo informa que el equipo '{id_pc}' ha dejado de reportarse por más de 2 minutos."
+        cuerpo = f"El sistema de monitoreo informa que el equipo '{id_pc}' cambió de estado: {detalle}."
         msg.attach(MIMEText(cuerpo, "plain"))
 
         server = smtplib.SMTP("smtp.gmail.com", 587)
@@ -46,13 +46,13 @@ def enviar_correo_alerta(id_pc):
         server.login(EMAIL_USER, EMAIL_PASS)
         server.sendmail(EMAIL_USER, EMAIL_DESTINO, msg.as_string())
         server.quit()
-        print(f"[CORREO] ¡Alerta enviada con éxito para {id_pc}!")
+        print(f"[CORREO] ¡Alerta enviada con éxito para {id_pc} ({detalle})!")
     except Exception as e:
         print(f"[CORREO ERROR] No se pudo enviar el correo: {e}")
 
 
 def verificar_y_actualizar_estados():
-    """Revisa los tiempos y marca como Offline si pasaron más de 2 minutos (120 segundos)"""
+    """Revisa los tiempos y actualiza los 3 estados: Online, Reintentando (>1m) o Desconectado (>3m)"""
     zona_mx = ZoneInfo("America/Mexico_City")
     ahora = datetime.now(zona_mx)
 
@@ -62,17 +62,36 @@ def verificar_y_actualizar_estados():
                 info["ultima_conexion"], "%Y-%m-%d %H:%M:%S"
             ).replace(tzinfo=zona_mx)
             diferencia = (ahora - ult_conexion).total_seconds()
+            ahora_str = ahora.strftime("%Y-%m-%d %H:%M:%S")
 
-            if diferencia > 120 and info["status"] == "Online":
-                ahora_str = ahora.strftime("%Y-%m-%d %H:%M:%S")
-                computadoras[id_pc]["status"] = "Offline"
+            # CASO 3: Más de 3 minutos (180 segundos) -> DESCONECTADO (Rojo)
+            if diferencia > 180:
+                if info["status"] != "Desconectado":
+                    computadoras[id_pc]["status"] = "Desconectado"
+                    historial_estatus.append({"id_pc": id_pc, "status": "Desconectado", "fecha": ahora_str})
                 
-                # Registrar en el historial de fallas y de estatus
-                registro_falla = {"id_pc": id_pc, "fecha_falla": ahora_str, "detalle": "Inactividad > 120s"}
-                historial_fallas.append(registro_falla)
-                historial_estatus.append({"id_pc": id_pc, "status": "Offline", "fecha": ahora_str})
+                if not info.get("alerta_3m_enviada", False):
+                    registro_falla = {"id_pc": id_pc, "fecha_falla": ahora_str, "detalle": "Desconectado (Inactividad > 3m)"}
+                    historial_fallas.append(registro_falla)
+                    computadoras[id_pc]["alerta_3m_enviada"] = True
+                    enviar_correo_alerta(id_pc, "Desconectado (>3 min)")
+
+            # CASO 2: Más de 1 minuto (60 segundos) pero menos de 3 minutos -> REINTENTANDO CONEXIÓN (Naranja)
+            elif diferencia > 60:
+                if info["status"] != "Desconectado Reintentando":
+                    computadoras[id_pc]["status"] = "Desconectado Reintentando"
+                    historial_estatus.append({"id_pc": id_pc, "status": "Desconectado Reintentando", "fecha": ahora_str})
                 
-                enviar_correo_alerta(id_pc)
+                if not info.get("alerta_1m_enviada", False):
+                    registro_falla = {"id_pc": id_pc, "fecha_falla": ahora_str, "detalle": "Desconectado Reintentando (Inactividad > 1m)"}
+                    historial_fallas.append(registro_falla)
+                    computadoras[id_pc]["alerta_1m_enviada"] = True
+                    enviar_correo_alerta(id_pc, "Desconectado Reintentando (>1 min)")
+
+            # CASO 1: Menos de 60 segundos -> ONLINE (Verde)
+            else:
+                computadoras[id_pc]["status"] = "Online"
+
         except Exception as e:
             print(f"Error procesando tiempos para {id_pc}: {e}")
 
@@ -93,13 +112,16 @@ def heartbeat():
         zona_mx = ZoneInfo("America/Mexico_City")
         ahora = datetime.now(zona_mx).strftime("%Y-%m-%d %H:%M:%S")
 
-        # Detectar si el estado anterior era Offline para registrar el regreso a Online
         estado_anterior = computadoras.get(id_pc, {}).get("status", "Offline")
         
-        computadoras[id_pc] = {"status": "Online", "ultima_conexion": ahora}
+        computadoras[id_pc] = {
+            "status": "Online", 
+            "ultima_conexion": ahora,
+            "alerta_1m_enviada": False,
+            "alerta_3m_enviada": False
+        }
         
-        # Registrar cambio en el historial general si el equipo revive
-        if estado_anterior == "Offline":
+        if estado_anterior != "Online":
             historial_estatus.append({"id_pc": id_pc, "status": "Online", "fecha": ahora})
             
         return jsonify({"mensaje": "Heartbeat recibido"}), 200
@@ -113,9 +135,7 @@ def heartbeat():
 
 @app.route("/descargar/excel/<tipo>", methods=["GET"])
 def descargar_excel(tipo):
-    """Genera un archivo CSV (compatible con Excel) codificado para admitir caracteres especiales"""
     output = io.StringIO()
-    # Escribir la firma BOM para que Excel detecte UTF-8 correctamente automáticamente
     output.write('\ufeff') 
     
     if tipo == "fallas":
@@ -137,7 +157,6 @@ def descargar_excel(tipo):
 
 @app.route("/descargar/pdf/<tipo>", methods=["GET"])
 def descargar_pdf(tipo):
-    """Genera un reporte limpio en formato PDF usando ReportLab"""
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
     story = []
@@ -150,7 +169,7 @@ def descargar_pdf(tipo):
     fecha_reporte = datetime.now(zona_mx).strftime("%Y-%m-%d %H:%M:%S")
 
     if tipo == "fallas":
-        story.append(Paragraph(f"Historial de Fallas (Equipos Offline)", titulo_estilo))
+        story.append(Paragraph(f"Historial de Fallas", titulo_estilo))
         story.append(Paragraph(f"Reporte generado el: {fecha_reporte}", styles['Normal']))
         story.append(Spacer(1, 15))
         
@@ -167,7 +186,6 @@ def descargar_pdf(tipo):
         for id_pc, info in computadoras.items():
             datos_tabla.append([id_pc, info['status'], info['ultima_conexion']])
 
-    # Si la tabla no tiene registros más allá de la cabecera
     if len(datos_tabla) == 1:
         datos_tabla.append(["Sin registros", "-", "-"])
 
@@ -200,6 +218,9 @@ def descargar_pdf(tipo):
 def mostrar_estados():
     verificar_y_actualizar_estados()
 
+    # Bandera para detonar el sonido
+    alerta_activa = "false"
+
     html = """
     <!DOCTYPE html>
     <html>
@@ -222,8 +243,9 @@ def mostrar_estados():
             th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #ddd; }
             th { background-color: #34495e; color: white; }
             tr:hover { background-color: #f1f1f1; }
-            .badge { padding: 6px 12px; border-radius: 20px; font-weight: bold; font-size: 14px; display: inline-block; }
+            .badge { padding: 6px 12px; border-radius: 20px; font-weight: bold; font-size: 13px; display: inline-block; }
             .online { background-color: #d4edda; color: #155724; }
+            .reintentando { background-color: #ffe8cc; color: #d97706; }
             .offline { background-color: #f8d7da; color: #721c24; }
             .lbl-reporte { font-weight: bold; color: #555; }
         </style>
@@ -244,7 +266,7 @@ def mostrar_estados():
         </div>
 
         <div class="buscador-container">
-            <input type="text" id="buscador" onkeyup="filtrarTabla()" placeholder="Buscar equipo por nombre (ej. 17)...">
+            <input type="text" id="buscador" onkeyup="filtrarTabla()" placeholder="Buscar equipo por nombre...">
         </div>
 
         <table id="tabla-equipos">
@@ -262,43 +284,98 @@ def mostrar_estados():
     for id_pc, info in computadoras.items():
         if info["status"] == "Online":
             clase_status = "online"
+            texto_status = "Online"
             icono = "✔️"
+        elif info["status"] == "Desconectado Reintentando":
+            clase_status = "reintentando"
+            texto_status = "Desconectado Reintentando..."
+            icono = "❓"
         else:
             clase_status = "offline"
+            texto_status = "Desconectado"
             icono = "❌"
+            alerta_activa = "true"  # Detona la alarma
 
         html += f"""
                 <tr>
                     <td><b>{id_pc}</b></td>
-                    <td><span class="badge {clase_status}">{info['status']}</span></td>
+                    <td><span class="badge {clase_status}">{texto_status}</span></td>
                     <td>{info['ultima_conexion']}</td>
                     <td style="font-size: 20px; padding-left: 25px;">{icono}</td>
                 </tr>
         """
 
-    html += """
+    html += f"""
             </tbody>
         </table>
 
         <script>
-            function filtrarTabla() {
+            const debeSonar = {alerta_activa};
+            let alarmaIntervalo = null;
+            let alarmaTimeout = null;
+            
+            if (debeSonar) {{
+                window.addEventListener('click', iniciarAlarma10Segundos);
+                setTimeout(iniciarAlarma10Segundos, 500);
+            }}
+
+            function iniciarAlarma10Segundos() {{
+                // Prevenir que se inicien múltiples instancias si el usuario hace clics repetidos
+                if (alarmaIntervalo) return; 
+
+                try {{
+                    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                    
+                    // Función interna para generar un pulso de sonido tipo "Beep"
+                    function emitirPitido() {{
+                        const oscillator = audioCtx.createOscillator();
+                        const gainNode = audioCtx.createGain();
+
+                        oscillator.connect(gainNode);
+                        gainNode.connect(audioCtx.destination);
+
+                        oscillator.type = 'sine';
+                        oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); // Frecuencia de la alarma (880Hz)
+                        gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime); // Volumen al 30%
+
+                        oscillator.start();
+                        oscillator.stop(audioCtx.currentTime + 0.3); // Cada pitido dura 0.3 segundos
+                    }}
+
+                    // Hace sonar la alarma de manera intermitente cada 0.6 segundos
+                    emitirPitido(); // Primer pitido inmediato
+                    alarmaIntervalo = setInterval(emitirPitido, 600);
+
+                    # Se apaga de forma permanente a los 10 segundos exactos (10000ms)
+                    alarmaTimeout = setTimeout(() => {{
+                        clearInterval(alarmaIntervalo);
+                        audioCtx.close();
+                        console.log("Alarma de 10 segundos finalizada.");
+                    }}, 10000);
+
+                }} catch(e) {{
+                    console.log("AudioContext bloqueado temporalmente por el navegador. Interactúa con la página.");
+                }}
+            }}
+
+            function filtrarTabla() {{
                 let input = document.getElementById("buscador");
                 let filter = input.value.toUpperCase();
                 let table = document.getElementById("tabla-equipos");
                 let tr = table.getElementsByTagName("tr");
 
-                for (let i = 1; i < tr.length; i++) {
+                for (let i = 1; i < tr.length; i++) {{
                     let td = tr[i].getElementsByTagName("td")[0];
-                    if (td) {
+                    if (td) {{
                         let txtValue = td.textContent || td.innerText;
-                        if (txtValue.toUpperCase().indexOf(filter) > -1) {
+                        if (txtValue.toUpperCase().indexOf(filter) > -1) {{
                             tr[i].style.display = "";
-                        } else {
+                        }} else {{
                             tr[i].style.display = "none";
-                        }
-                    }
-                }
-            }
+                        }}
+                    }}
+                }}
+            }}
         </script>
     </body>
     </html>
