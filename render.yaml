@@ -1,0 +1,6 @@
+services
+  - type web
+    name Monitoreo_iqos
+    runtime python
+    buildCommand pip install -r requirements.txt
+    startCommand gunicorn appapp
