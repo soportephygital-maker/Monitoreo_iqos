@@ -16,7 +16,9 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 
 app = Flask(__name__)
 
-# Archivos de base de datos local para evitar pérdida de datos por reinicios de Render
+# =========================================================================
+# RUTAS PARA VERSIÓN GRATUITA: Se guardan directamente en la raíz de Render
+# =========================================================================
 ARCHIVO_COMPUTADORAS = "computadoras_db.json"
 ARCHIVO_FALLAS = "historial_fallas_db.json"
 
@@ -26,17 +28,24 @@ historial_fallas = []
 
 # --- FUNCIONES DE PERSISTENCIA ---
 def cargar_datos_locales():
-    """Carga los datos desde los archivos JSON si existen"""
+    """Carga los datos desde los archivos JSON en la raíz de Render"""
     global computadoras, historial_fallas
     if os.path.exists(ARCHIVO_COMPUTADORAS):
-        with open(ARCHIVO_COMPUTADORAS, "r", encoding="utf-8") as f:
-            computadoras = json.load(f)
+        try:
+            with open(ARCHIVO_COMPUTADORAS, "r", encoding="utf-8") as f:
+                computadoras = json.load(f)
+        except Exception:
+            computadoras = {}
+            
     if os.path.exists(ARCHIVO_FALLAS):
-        with open(ARCHIVO_FALLAS, "r", encoding="utf-8") as f:
-            historial_fallas = json.load(f)
+        try:
+            with open(ARCHIVO_FALLAS, "r", encoding="utf-8") as f:
+                historial_fallas = json.load(f)
+        except Exception:
+            historial_fallas = []
 
 def guardar_datos_locales():
-    """Guarda el estado e historial actual en archivos JSON"""
+    """Guarda el estado actual directamente en el almacenamiento de Render Gratis"""
     with open(ARCHIVO_COMPUTADORAS, "w", encoding="utf-8") as f:
         json.dump(computadoras, f, ensure_ascii=False, indent=4)
     with open(ARCHIVO_FALLAS, "w", encoding="utf-8") as f:
@@ -45,16 +54,15 @@ def guardar_datos_locales():
 # Inicializar los datos guardados al arrancar la App
 cargar_datos_locales()
 
-# Configuración de alertas por correo desde variables de entorno
-EMAIL_USER = os.environ.get("EMAIL_USER")
-EMAIL_PASS = os.environ.get("EMAIL_PASS")
-EMAIL_DESTINO = os.environ.get("EMAIL_USER")
+# Configuración de alertas por correo
+EMAIL_USER = os.environ.get("soportephygital@gmail.com")
+EMAIL_PASS = os.environ.get("obfl nmnm izhl kndg")
+EMAIL_DESTINO = "soportephygital@gmail.com"
 
 
 def enviar_correo_alerta(id_pc, detalle):
-    """Función para enviar un correo cuando una PC se desconecta (Modificado para soportar detalles)"""
     if not EMAIL_USER or not EMAIL_PASS:
-        print("[ALERTA] No se envió correo: Faltan configurar las variables.")
+        print("[ALERTA] No se envió correo: Faltan credenciales.")
         return
 
     try:
@@ -66,7 +74,6 @@ def enviar_correo_alerta(id_pc, detalle):
         cuerpo = f"El sistema de monitoreo informa que el equipo '{id_pc}' cambió de estado crítico: {detalle}."
         msg.attach(MIMEText(cuerpo, "plain"))
 
-        # Conexión al servidor SMTP seguro de Gmail (Puerto corregido a 587)
         server = smtplib.SMTP("smtp.gmail.com", 587)
         server.starttls()
         server.login(EMAIL_USER, EMAIL_PASS)
@@ -78,7 +85,6 @@ def enviar_correo_alerta(id_pc, detalle):
 
 
 def verificar_y_actualizar_estados():
-    """Revisa los tiempos y segmenta en los 3 estados requeridos sin duplicar historial"""
     zona_mx = ZoneInfo("America/Mexico_City")
     ahora = datetime.now(zona_mx)
     hubo_cambios = False
@@ -91,7 +97,7 @@ def verificar_y_actualizar_estados():
             diferencia = (ahora - ult_conexion).total_seconds()
             ahora_str = ahora.strftime("%Y-%m-%d %H:%M:%S")
 
-            # CASO 3: Más de 3 minutos (180 segundos) -> DESCONECTADO (Rojo)
+            # CASO 3: Más de 3 minutos -> DESCONECTADO (Rojo)
             if diferencia > 180:
                 if info["status"] != "Desconectado":
                     computadoras[id_pc]["status"] = "Desconectado"
@@ -103,7 +109,7 @@ def verificar_y_actualizar_estados():
                     hubo_cambios = True
                     enviar_correo_alerta(id_pc, "Desconectado (>3 min)")
 
-            # CASO 2: Más de 1 minuto (60 segundos) -> REINTENTANDO CONEXIÓN (Naranja)
+            # CASO 2: Más de 1 minuto -> REINTENTANDO CONEXIÓN (Naranja)
             elif diferencia > 60:
                 if info["status"] != "Desconectado Reintentando":
                     computadoras[id_pc]["status"] = "Desconectado Reintentando"
@@ -146,7 +152,6 @@ def heartbeat():
 
         cargar_datos_locales()
 
-        # Restablecer estados y banderas de alertas al recibir pulso de vida
         computadoras[id_pc] = {
             "status": "Online", 
             "ultima_conexion": ahora,
@@ -160,16 +165,54 @@ def heartbeat():
         return jsonify({"error": str(e)}), 500
 
 
+# =========================================================================
+# NUEVO: ENDPOINT PARA RESTAURAR RESPALDOS JSON EN LA VERSIÓN GRATUITA
+# =========================================================================
+@app.route("/cargar-respaldo", methods=["POST"])
+def cargar_respaldo():
+    """Permite subir los archivos descargados para no perder historial al actualizar"""
+    global computadoras, historial_fallas
+    try:
+        if 'archivo_computadoras' in request.files:
+            file_comp = request.files['archivo_computadoras']
+            if file_comp.filename != '':
+                computadoras = json.load(file_comp)
+                
+        if 'archivo_fallas' in request.files:
+            file_fallas = request.files['archivo_fallas']
+            if file_fallas.filename != '':
+                historial_fallas = json.load(file_fallas)
+                
+        guardar_datos_locales()
+        return """<script>alert('¡Respaldo cargado con éxito!'); window.location.href='/estados';</script>"""
+    except Exception as e:
+        return f"Error al cargar respaldo: {e}", 500
+
+
 # ==========================================
 # ENDPOINTS PARA EXPORTACIÓN DE REPORTES
 # ==========================================
 
+@app.route("/descargar/json/<tipo>", methods=["GET"])
+def descargar_json(tipo):
+    """Permite descargar el archivo de texto real para respaldar en tu PC"""
+    cargar_datos_locales()
+    if tipo == "fallas":
+        data = json.dumps(historial_fallas, ensure_ascii=False, indent=4)
+        filename = "historial_fallas_db.json"
+    else:
+        data = json.dumps(computadoras, ensure_ascii=False, indent=4)
+        filename = "computadoras_db.json"
+        
+    response = Response(data, mimetype="application/json")
+    response.headers["Content-Disposition"] = f"attachment; filename={filename}"
+    return response
+
 @app.route("/descargar/excel/<tipo>", methods=["GET"])
 def descargar_excel(tipo):
-    """Genera reportes en formato CSV compatible con Excel auto-detectable"""
     cargar_datos_locales()
     output = io.StringIO()
-    output.write('\ufeff') # Firma BOM para caracteres especiales UTF-8
+    output.write('\ufeff') 
     
     if tipo == "fallas":
         output.write("ID Computadora,Fecha de Falla,Detalle\n")
@@ -190,7 +233,6 @@ def descargar_excel(tipo):
 
 @app.route("/descargar/pdf/<tipo>", methods=["GET"])
 def descargar_pdf(tipo):
-    """Genera reportes visuales en PDF usando ReportLab"""
     cargar_datos_locales()
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
@@ -260,16 +302,17 @@ def mostrar_estados():
     <html>
     <head>
         <meta charset="UTF-8">
-        <meta http-equiv="refresh" content="15"> <title>Monitoreo de Equipos</title>
+        <meta http-equiv="refresh" content="15"> 
+        <title>Monitoreo de Equipos</title>
         <style>
             body { font-family: Arial, sans-serif; margin: 40px; background-color: #f4f6f9; color: #333; }
             h1 { color: #2c3e50; margin-bottom: 5px; }
-            .seccion-reportes { background: #fff; padding: 15px; margin-bottom: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); display: flex; gap: 10px; align-items: center; }
-            .btn { padding: 8px 14px; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; text-decoration: none; font-size: 13px; display: inline-block; }
+            .seccion-reportes { background: #fff; padding: 15px; margin-bottom: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+            .btn { padding: 6px 12px; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; text-decoration: none; font-size: 13px; display: inline-block; }
             .btn-excel { background-color: #27ae60; color: white; }
-            .btn-excel:hover { background-color: #219653; }
             .btn-pdf { background-color: #c0392b; color: white; }
-            .btn-pdf:hover { background-color: #a32e22; }
+            .btn-json { background-color: #2980b9; color: white; }
+            .btn-subir { background-color: #8e44ad; color: white; margin-left: 5px;}
             .buscador-container { margin-bottom: 20px; }
             #buscador { padding: 10px; width: 300px; font-size: 16px; border: 1px solid #ccc; border-radius: 4px; }
             table { width: 100%; border-collapse: collapse; background-color: white; box-shadow: 0 4px 6px rgba(0,0,0,0.1); border-radius: 8px; overflow: hidden; }
@@ -292,10 +335,21 @@ def mostrar_estados():
             <span class="lbl-reporte">Estatus Actual:</span>
             <a href="/descargar/excel/estatus" class="btn btn-excel">📥 Excel</a>
             <a href="/descargar/pdf/estatus" class="btn btn-pdf">📄 PDF</a>
+            <a href="/descargar/json/estatus" class="btn btn-json" title="Descargar respaldo técnico">💾 Resp. JSON</a>
             
             <span class="lbl-reporte" style="margin-left: 20px;">Historial de Fallas:</span>
-            <a href="/descargar/excel/fallas" class="btn btn-excel">📥 Excel (Historial)</a>
-            <a href="/descargar/pdf/fallas" class="btn btn-pdf">📄 PDF (Historial)</a>
+            <a href="/descargar/excel/fallas" class="btn btn-excel">📥 Excel (Hist)</a>
+            <a href="/descargar/pdf/fallas" class="btn btn-pdf">📄 PDF (Hist)</a>
+            <a href="/descargar/json/fallas" class="btn btn-json" title="Descargar respaldo técnico">💾 Resp. JSON</a>
+        </div>
+
+        <div class="seccion-reportes" style="background: #fdf2fa; border: 1px dashed #8e44ad;">
+            <form action="/cargar-respaldo" method="POST" enctype="multipart/form-data" style="display: flex; align-items: center; gap: 10px; font-size: 13px;">
+                <span class="lbl-reporte" style="color: #8e44ad;">🛠️ Herramienta Antiborrado (Subir Respaldos JSON si actualizas Render):</span>
+                <label>PCs: <input type="file" name="archivo_computadoras" accept=".json"></label>
+                <label>Fallas: <input type="file" name="archivo_fallas" accept=".json"></label>
+                <button type="submit" class="btn btn-subir">⚡ Cargar Datos</button>
+            </form>
         </div>
 
         <div class="buscador-container">
@@ -327,7 +381,7 @@ def mostrar_estados():
             clase_status = "offline"
             texto_status = "Desconectado"
             icono = "❌"
-            alerta_activa = "true" # Si hay al menos un rojo, activa bandera sonora
+            alerta_activa = "true" 
 
         html += f"""
                 <tr>
@@ -375,14 +429,13 @@ def mostrar_estados():
                     emitirPitido(); 
                     alarmaIntervalo = setInterval(emitirPitido, 600);
 
-                    // Detener de forma limpia a los 10 segundos exactos
                     setTimeout(() => {{
                         clearInterval(alarmaIntervalo);
                         audioCtx.close();
                     }}, 10000);
 
                 }} catch(e) {{
-                    console.log("Audio Bloqueado por el navegador. Haz click en la página.");
+                    console.log("Audio Bloqueado por el navegador.");
                 }}
             }}
 
